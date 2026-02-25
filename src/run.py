@@ -199,10 +199,10 @@ def main():
 
             posted += 1
             # лимит, чтобы не заспамить канал на первом запуске
-            if posted >= 10:
+            if posted >= 3:
                 break
 
-        if posted >= 10:
+        if posted >= 3:
             break
 
     save_state(cfg.state_path, state)
