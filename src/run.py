@@ -98,12 +98,6 @@ def main():
     cfg = load_config()
     init_db(cfg.db_path)
     state = load_state(cfg.state_path)
-        # TG healthcheck (чтобы сразу видеть проблему прав/ID)
-    try:
-        send_message(cfg.telegram_bot_token, cfg.telegram_channel_id, "✅ Deal Engine: healthcheck (можно удалить)")
-    except Exception as e:
-        raise RuntimeError(f"Telegram sendMessage failed. Check bot admin rights & TELEGRAM_CHANNEL_ID. Error: {e}")
-
     sources = load_sources(cfg.sources_path)
     if not sources:
         raise RuntimeError("No sources found in sources.yaml")
