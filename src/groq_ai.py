@@ -7,23 +7,38 @@ from typing import List, Optional
 class DealExtract(BaseModel):
     company: Optional[str] = None
     country: Optional[str] = None
-    stage: Optional[str] = None          # Seed / Series A / etc
-    amount_usd: Optional[float] = None   # если удалось
+    stage: Optional[str] = None          # Pre-Seed/Seed/Series A/...
+    amount_usd: Optional[float] = None
     investors: List[str] = Field(default_factory=list)
-    sector: Optional[str] = None         # fintech / edtech / etc
-    business_model: Optional[str] = None # B2B / B2C / B2B2C / unknown
-    signals: List[str] = Field(default_factory=list)  # expansion, enterprise, govtech, ai, etc
-    one_line: Optional[str] = None       # 1 строка, смысл
+    sector: Optional[str] = None         # fintech/edtech/etc
+    business_model: Optional[str] = None # B2B/B2C/B2B2C/Unknown
+    signals: List[str] = Field(default_factory=list)
+
+    # RU output
+    ru_one_line: Optional[str] = None            # 1 строка: что случилось
+    ru_why_important: List[str] = Field(default_factory=list)  # 2-4 буллета
+    ru_deal_angles: List[str] = Field(default_factory=list)    # 2-4 буллета (как зайти в сделку)
+    ru_watchouts: List[str] = Field(default_factory=list)      # 0-3 риска/оговорки
+
     confidence: Optional[float] = None   # 0..1
 
 SYSTEM = """You are a LATAM venture deals analyst.
-Extract structured investment/deal facts from a news article.
+Extract structured investment/deal facts from a news article and write brief analytics in Russian.
+
 Return ONLY valid JSON matching the provided schema. No markdown. No extra keys.
-If a field is unknown, set it to null (or empty list).
-Prefer LATAM country names when possible.
-Stage must be one of: Pre-Seed, Seed, Series A, Series B, Series C, Growth, Debt, Grant, M&A, IPO, Unknown.
-Business model must be one of: B2B, B2C, B2B2C, Unknown.
-Signals examples: expansion, enterprise, govtech, ai, fintech_infra, payments, hrtech, edtech, climate, logistics, cybersecurity.
+If unknown, set null (or empty list).
+
+Rules:
+- country: single country if possible.
+- stage must be one of: Pre-Seed, Seed, Series A, Series B, Series C, Growth, Debt, Grant, M&A, IPO, Unknown.
+- business_model must be one of: B2B, B2C, B2B2C, Unknown.
+- signals: choose from: expansion, enterprise, govtech, ai, fintech_infra, payments, hrtech, edtech, climate, logistics, cybersecurity, marketplace, devtools, data.
+
+RU blocks style:
+- ru_one_line: <= 160 chars.
+- ru_why_important: 2-4 bullets, each <= 140 chars.
+- ru_deal_angles: 2-4 bullets, each <= 140 chars. Practical: who to pitch / what offer / what entry point.
+- ru_watchouts: 0-3 bullets, each <= 140 chars.
 """
 
 def groq_extract(
@@ -44,9 +59,9 @@ def groq_extract(
             "source": source,
             "title": title,
             "url": url,
-            "text": content[:12000],  # ограничим
+            "text": content[:12000],
         },
-        "instructions": "Extract best-effort. amount_usd as number if possible. country as a single country.",
+        "instructions": "Best-effort extraction. amount_usd must be a number if possible; else null.",
     }
 
     payload = {
@@ -65,7 +80,11 @@ def groq_extract(
     }
 
     with httpx.Client(timeout=timeout_s) as client:
-        r = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
+        r = client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+        )
         r.raise_for_status()
         data = r.json()
 
