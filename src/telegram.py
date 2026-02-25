@@ -1,8 +1,18 @@
 from __future__ import annotations
 import html
 import httpx
+from typing import Optional
 
-def send_message(bot_token: str, chat_id: str, text: str, timeout_s: float = 20.0) -> None:
+def esc(s: str) -> str:
+    return html.escape(s or "", quote=False)
+
+def send_message(
+    bot_token: str,
+    chat_id: str,
+    text: str,
+    reply_to_message_id: Optional[int] = None,
+    timeout_s: float = 20.0,
+) -> int:
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -10,9 +20,14 @@ def send_message(bot_token: str, chat_id: str, text: str, timeout_s: float = 20.
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
     }
+    if reply_to_message_id is not None:
+        payload["reply_to_message_id"] = reply_to_message_id
+        payload["allow_sending_without_reply"] = True
+
     with httpx.Client(timeout=timeout_s) as client:
         r = client.post(url, json=payload)
         r.raise_for_status()
+        data = r.json()
 
-def esc(s: str) -> str:
-    return html.escape(s or "", quote=False)
+    # Telegram response: {"ok":true,"result":{"message_id":...}}
+    return int(data["result"]["message_id"])
