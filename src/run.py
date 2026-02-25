@@ -1,7 +1,5 @@
 from __future__ import annotations
-import os
 import yaml
-from datetime import datetime, timezone
 from .config import load_config
 from .ingest import parse_feed
 from .extract import fetch_article_text
@@ -16,52 +14,83 @@ def load_sources(path: str):
         data = yaml.safe_load(f)
     return data.get("sources", [])
 
-def format_post(source: str, title: str, url: str, deal: dict, score: int) -> str:
+def fmt_amount(amount):
+    if not isinstance(amount, (int, float)) or amount <= 0:
+        return None
+    if amount >= 1_000_000:
+        return f"${amount/1_000_000:.1f}M"
+    if amount >= 1_000:
+        return f"${amount/1_000:.0f}K"
+    return f"${amount:.0f}"
+
+def join_bullets(items, max_n=4):
+    items = [x.strip() for x in (items or []) if x and x.strip()]
+    return items[:max_n]
+
+def format_signal_ru(source: str, title: str, url: str, deal: dict, score: int) -> str:
     country = deal.get("country") or "LATAM"
-    company = deal.get("company") or "Unknown"
+    company = deal.get("company") or "Компания"
     stage = deal.get("stage") or "Unknown"
-    amount = deal.get("amount_usd")
+    amount_str = fmt_amount(deal.get("amount_usd"))
     sector = deal.get("sector") or "unknown"
     bm = deal.get("business_model") or "Unknown"
     investors = deal.get("investors") or []
-    signals = deal.get("signals") or []
-    one_line = deal.get("one_line") or ""
+    sig = deal.get("signals") or []
+    ru_one_line = deal.get("ru_one_line") or ""
 
-    amount_str = ""
-    if isinstance(amount, (int, float)) and amount > 0:
-        # округлим красиво
-        if amount >= 1_000_000:
-            amount_str = f"${amount/1_000_000:.1f}M"
-        elif amount >= 1_000:
-            amount_str = f"${amount/1_000:.0f}K"
-        else:
-            amount_str = f"${amount:.0f}"
-
-    inv_str = ", ".join(investors[:5])
-    sig_str = ", ".join(signals[:6])
+    inv_str = ", ".join(investors[:4])
+    sig_str = ", ".join(sig[:6])
 
     lines = []
-    lines.append(f"🌎 <b>{esc(country)}</b> | <b>{esc(company)}</b>")
-    head = f"{esc(title)}"
-    lines.append(f"<b>{head}</b>")
-    meta = f"Stage: <b>{esc(stage)}</b>"
+    lines.append(f"📡 <b>Сделка / сигнал</b> | <b>{esc(country)}</b>")
+    lines.append(f"<b>{esc(company)}</b>")
+    lines.append(f"{esc(clamp(title, 220))}")
+
+    meta = f"Раунд: <b>{esc(stage)}</b>"
     if amount_str:
-        meta += f" | Amount: <b>{esc(amount_str)}</b>"
-    meta += f" | Model: <b>{esc(bm)}</b>"
+        meta += f" | Сумма: <b>{esc(amount_str)}</b>"
+    meta += f" | Модель: <b>{esc(bm)}</b>"
     lines.append(meta)
 
-    lines.append(f"Sector: <b>{esc(sector)}</b> | Score: <b>{score}</b>/100")
+    lines.append(f"Сектор: <b>{esc(sector)}</b> | Deal Score: <b>{score}</b>/100")
 
-    if one_line:
-        lines.append(f"🧠 {esc(clamp(one_line, 220))}")
+    if ru_one_line:
+        lines.append(f"🧠 {esc(clamp(ru_one_line, 220))}")
 
     if inv_str:
-        lines.append(f"💼 Investors: {esc(inv_str)}")
+        lines.append(f"💼 Инвесторы: {esc(inv_str)}")
     if sig_str:
-        lines.append(f"🏷 Signals: {esc(sig_str)}")
+        lines.append(f"🏷 Сигналы: {esc(sig_str)}")
 
     lines.append(f"🔗 {esc(url)}")
-    lines.append(f"🗞 Source: {esc(source)}")
+    lines.append(f"🗞 Источник: {esc(source)}")
+
+    return "\n".join(lines)
+
+def format_note_ru(deal: dict, score: int, reasons: list[str]) -> str:
+    why = join_bullets(deal.get("ru_why_important"), 4)
+    angles = join_bullets(deal.get("ru_deal_angles"), 4)
+    watch = join_bullets(deal.get("ru_watchouts"), 3)
+
+    lines = []
+    lines.append(f"📝 <b>Короткая аналитика</b> (Score {score}/100)")
+    if reasons:
+        lines.append(f"⚙️ Скоринг: {esc(', '.join(reasons[:8]))}")
+
+    if why:
+        lines.append("\n<b>Почему важно</b>")
+        for b in why:
+            lines.append(f"• {esc(clamp(b, 160))}")
+
+    if angles:
+        lines.append("\n<b>Как зайти в сделку</b>")
+        for b in angles:
+            lines.append(f"• {esc(clamp(b, 160))}")
+
+    if watch:
+        lines.append("\n<b>Риски / оговорки</b>")
+        for b in watch:
+            lines.append(f"• {esc(clamp(b, 160))}")
 
     return "\n".join(lines)
 
@@ -88,14 +117,13 @@ def main():
 
             processed += 1
 
-            # 1) extract article text
-            text = ""
+            # 1) extract text
             try:
                 text = fetch_article_text(it.url)
             except Exception:
                 text = ""
 
-            # 2) AI extraction
+            # 2) AI extract + RU analytics
             try:
                 deal_obj = groq_extract(
                     api_key=cfg.groq_api_key,
@@ -107,13 +135,12 @@ def main():
                     fallback_summary=it.summary,
                 )
             except Exception:
-                # если AI упал — всё равно сохраним seen, чтобы не долбить одну и ту же
                 mark_seen(state, it.url, it.guid)
                 continue
 
             deal = deal_obj.model_dump()
 
-            # 3) scoring
+            # 3) scoring (rules)
             sr = compute_score(
                 country=deal.get("country"),
                 stage=deal.get("stage"),
@@ -123,16 +150,27 @@ def main():
                 investors=deal.get("investors") or [],
             )
 
-            # 4) publish
-            post_text = format_post(it.source, it.title, it.url, deal, sr.score)
+            # 4) Post #1 (signal)
+            signal_text = format_signal_ru(it.source, it.title, it.url, deal, sr.score)
             try:
-                send_message(cfg.telegram_bot_token, cfg.telegram_channel_id, post_text)
-                posted += 1
+                msg_id = send_message(cfg.telegram_bot_token, cfg.telegram_channel_id, signal_text)
             except Exception:
-                # не отметим seen, чтобы попробовать ещё раз на следующем запуске
                 continue
 
-            # 5) store
+            # 5) Post #2 (note) as reply
+            note_text = format_note_ru(deal, sr.score, sr.reasons)
+            try:
+                send_message(
+                    cfg.telegram_bot_token,
+                    cfg.telegram_channel_id,
+                    note_text,
+                    reply_to_message_id=msg_id,
+                )
+            except Exception:
+                # если нота не ушла — это не критично, продолжаем
+                pass
+
+            # 6) store
             record = {
                 "created_at_utc": utc_now_iso(),
                 "source": it.source,
@@ -148,25 +186,26 @@ def main():
                 "sector": deal.get("sector"),
                 "business_model": deal.get("business_model"),
                 "signals": ",".join(deal.get("signals") or []),
-                "one_line": deal.get("one_line"),
+                "one_line": deal.get("ru_one_line") or deal.get("ru_one_line"),  # храним RU
                 "confidence": deal.get("confidence"),
                 "deal_score": sr.score,
                 "score_reasons": ",".join(sr.reasons),
             }
             insert_deal(cfg.db_path, record)
 
-            # 6) mark seen
+            # 7) mark seen
             mark_seen(state, it.url, it.guid)
 
-            # safety limit per run (чтобы не заспамить канал при первом старте)
-            if posted >= 12:
+            posted += 1
+            # лимит, чтобы не заспамить канал на первом запуске
+            if posted >= 10:
                 break
 
-        if posted >= 12:
+        if posted >= 10:
             break
 
     save_state(cfg.state_path, state)
-    print(f"Processed new items: {processed}, Posted: {posted}")
+    print(f"Processed new items: {processed}, Posted deals: {posted}")
 
 if __name__ == "__main__":
     main()
