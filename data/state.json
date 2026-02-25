@@ -1,5 +1,21 @@
 {
-  "seen_urls": [],
-  "seen_guids": [],
-  "last_run_utc": null
+  "seen_urls": [
+    "https://latamlist.com/99pay-raises-135m-via-fidc/",
+    "https://techcrunch.com/2025/03/27/yc-alum-mendel-a-ramp-for-latam-enterprises-raises-35m-series-b/",
+    "https://techcrunch.com/2025/04/23/fluent-ventures-backs-replicated-startup-models-in-emerging-markets/",
+    "https://techcrunch.com/2025/05/04/revelos-latam-talent-network-sees-strong-demand-from-us-companies-thanks-to-ai/",
+    "https://techcrunch.com/2025/05/05/here-are-latin-americas-biggest-startups-based-on-valuation/",
+    "https://techcrunch.com/2025/01/31/stablecoins-are-finding-product-market-fit-in-emerging-markets/",
+    "https://techcrunch.com/podcast/silicon-valleys-impact-on-the-election-and-an-acquisition-making-our-headspin/"
+  ],
+  "seen_guids": [
+    "https://techcrunch.com/?p=2997521",
+    "https://techcrunch.com/?p=2986522",
+    "https://techcrunch.com/?p=2956208",
+    "https://techcrunch.com/?p=3002393",
+    "https://latamlist.com/?p=17988",
+    "https://techcrunch.com/?post_type=tc_podcast&p=2811973",
+    "https://techcrunch.com/?p=2999102"
+  ],
+  "last_run_utc": "2026-02-25T13:27:56+00:00"
 }
