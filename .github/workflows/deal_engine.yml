@@ -1,4 +1,4 @@
-name: LATAM Deal Engine - Publish
+name: LATAM Deal Engine
 
 on:
   schedule:
