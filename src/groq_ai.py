@@ -41,6 +41,16 @@ RU blocks style:
 - ru_watchouts: 0-3 bullets, each <= 140 chars.
 """
 
+def _extract_json_loose(text: str) -> dict:
+    """
+    Fallback: пытаемся вытащить первый JSON-объект из текста.
+    """
+    import re, json
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        raise ValueError("No JSON object found in model output")
+    return json.loads(m.group(0))
+
 def groq_extract(
     api_key: str,
     model: str,
@@ -61,13 +71,12 @@ def groq_extract(
             "url": url,
             "text": content[:12000],
         },
-        "instructions": "Best-effort extraction. amount_usd must be a number if possible; else null.",
+        "instructions": "Return ONLY JSON. No markdown. No extra keys.",
     }
 
-    payload = {
+    base_payload = {
         "model": model,
         "temperature": 0.2,
-        "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
@@ -80,14 +89,30 @@ def groq_extract(
     }
 
     with httpx.Client(timeout=timeout_s) as client:
-        r = client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers,
-            json=payload,
-        )
+        # Attempt #1: JSON mode (если поддерживается)
+        payload = dict(base_payload)
+        payload["response_format"] = {"type": "json_object"}
+        r = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
+
+        # Если модель/аккаунт не поддерживает response_format — пробуем без него
+        if r.status_code >= 400:
+            err_txt = r.text
+            payload2 = dict(base_payload)
+            r2 = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload2)
+            r2.raise_for_status()
+            data = r2.json()
+            raw = data["choices"][0]["message"]["content"]
+            obj = _extract_json_loose(raw)
+            return DealExtract.model_validate(obj)
+
         r.raise_for_status()
         data = r.json()
+        raw = data["choices"][0]["message"]["content"]
 
-    raw = data["choices"][0]["message"]["content"]
-    obj = json.loads(raw)
+    # Даже в JSON mode иногда прилетает мусор — подстрахуемся
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        obj = _extract_json_loose(raw)
+
     return DealExtract.model_validate(obj)
