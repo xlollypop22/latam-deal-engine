@@ -98,6 +98,11 @@ def main():
     cfg = load_config()
     init_db(cfg.db_path)
     state = load_state(cfg.state_path)
+        # TG healthcheck (чтобы сразу видеть проблему прав/ID)
+    try:
+        send_message(cfg.telegram_bot_token, cfg.telegram_channel_id, "✅ Deal Engine: healthcheck (можно удалить)")
+    except Exception as e:
+        raise RuntimeError(f"Telegram sendMessage failed. Check bot admin rights & TELEGRAM_CHANNEL_ID. Error: {e}")
 
     sources = load_sources(cfg.sources_path)
     if not sources:
@@ -134,8 +139,9 @@ def main():
                     text=text,
                     fallback_summary=it.summary,
                 )
-            except Exception:
-                mark_seen(state, it.url, it.guid)
+            except Exception as e:
+                print(f"[GROQ ERROR] {it.url} | {e}")
+                # НЕ mark_seen — пусть попробует снова на следующем запуске
                 continue
 
             deal = deal_obj.model_dump()
@@ -154,7 +160,8 @@ def main():
             signal_text = format_signal_ru(it.source, it.title, it.url, deal, sr.score)
             try:
                 msg_id = send_message(cfg.telegram_bot_token, cfg.telegram_channel_id, signal_text)
-            except Exception:
+            except Exception as e:
+                print(f"[TG ERROR] {it.url} | {e}")
                 continue
 
             # 5) Post #2 (note) as reply
