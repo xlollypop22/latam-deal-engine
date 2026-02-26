@@ -2,8 +2,7 @@ name: LATAM Deal Engine
 
 on:
   schedule:
-    # Каждый час
-    - cron: "0 * * * *"
+    - cron: "0 */2 * * *"   # каждые 2 часа
   workflow_dispatch:
 
 permissions:
@@ -12,17 +11,14 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -33,10 +29,14 @@ jobs:
           GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
-        run: |
-          python -m src.run
 
-      - name: Commit updated state
+          MAX_POSTS_PER_RUN: "2"      # 🔥 теперь 2 сделки
+          MIN_PUBLISHED_YEAR: "2026"
+          YEAR_FILTER_STRICT: "1"
+
+        run: python -m src.run
+
+      - name: Commit state
         run: |
           git config user.name "deal-engine-bot"
           git config user.email "deal-engine-bot@users.noreply.github.com"
