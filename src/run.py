@@ -1,79 +1,116 @@
 from __future__ import annotations
+
+import os
+import re
 import yaml
+from datetime import datetime
+from typing import List, Tuple, Optional
+
 from .config import load_config
-from .ingest import parse_feed
+from .ingest import parse_feed, FeedItem
 from .extract import fetch_article_text
 from .groq_ai import groq_extract
 from .score import compute_score
 from .storage import init_db, load_state, save_state, is_seen, mark_seen, insert_deal
 from .telegram import send_message, esc
-from .utils import utc_now_iso, clamp
+from .utils import utc_now_iso, clamp, normalize_url
+
 
 def load_sources(path: str):
     with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+        data = yaml.safe_load(f) or {}
     return data.get("sources", [])
 
-def fmt_amount(amount):
+
+def fmt_amount(amount) -> Optional[str]:
     if not isinstance(amount, (int, float)) or amount <= 0:
         return None
+    if amount >= 1_000_000_000:
+        return f"${amount/1_000_000_000:.1f}B"
     if amount >= 1_000_000:
         return f"${amount/1_000_000:.1f}M"
     if amount >= 1_000:
         return f"${amount/1_000:.0f}K"
     return f"${amount:.0f}"
 
+
 def join_bullets(items, max_n=4):
     items = [x.strip() for x in (items or []) if x and x.strip()]
     return items[:max_n]
 
-def format_signal_ru(source: str, title: str, url: str, deal: dict, score: int) -> str:
-    country = deal.get("country") or "LATAM"
-    company = deal.get("company") or "Компания"
-    stage = deal.get("stage") or "Unknown"
-    amount_str = fmt_amount(deal.get("amount_usd"))
-    sector = deal.get("sector") or "unknown"
-    bm = deal.get("business_model") or "Unknown"
-    investors = deal.get("investors") or []
-    sig = deal.get("signals") or []
-    ru_one_line = deal.get("ru_one_line") or ""
 
-    inv_str = ", ".join(investors[:4])
-    sig_str = ", ".join(sig[:6])
+def infer_year_from_url(url: str) -> Optional[int]:
+    u = (url or "").strip()
+    m = re.search(r"/(20\d{2})/", u)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+    m = re.search(r"(20\d{2})", u)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+    return None
+
+
+def item_year(it: FeedItem) -> Optional[int]:
+    # 1) published_at ISO
+    if it.published_at:
+        try:
+            return datetime.fromisoformat(it.published_at.replace("Z", "+00:00")).year
+        except Exception:
+            pass
+    # 2) url hint
+    return infer_year_from_url(it.url)
+
+
+def pass_year_filter(it: FeedItem, min_year: int, strict: bool) -> bool:
+    y = item_year(it)
+    if y is None:
+        return not strict
+    return y >= min_year
+
+
+def format_signal_ru(title: str, url: str, deal: dict, score: int) -> str:
+    # desired: no "Источник", no "Сигналы", link as icon
+    link_icon = "↗"
+    country = deal.get("country") or "LATAM"
+    company = (deal.get("company") or "").strip() or "—"
+    stage = deal.get("stage") or "Unknown"
+    bm = deal.get("business_model") or "Unknown"
+    sector = (deal.get("sector") or "unknown").strip().lower()
+    amount_str = fmt_amount(deal.get("amount_usd")) or "—"
+
+    ru_one_line = (deal.get("ru_one_line") or "").strip()
 
     lines = []
-    lines.append(f"📡 <b>Сделка / сигнал</b> | <b>{esc(country)}</b>")
+    lines.append(f"📡 <b>Сделка / сигнал</b> | {esc(country)}")
     lines.append(f"<b>{esc(company)}</b>")
     lines.append(f"{esc(clamp(title, 220))}")
 
-    meta = f"Раунд: <b>{esc(stage)}</b>"
-    if amount_str:
-        meta += f" | Сумма: <b>{esc(amount_str)}</b>"
-    meta += f" | Модель: <b>{esc(bm)}</b>"
-    lines.append(meta)
-
-    lines.append(f"Сектор: <b>{esc(sector)}</b> | Deal Score: <b>{score}</b>/100")
+    lines.append(f"Раунд: {esc(stage)} | Модель: {esc(bm)} | Инвестиции: {esc(amount_str)}")
+    lines.append(f"Отрасль: {esc(sector)} | Оценка потенциала: {score}/100")
 
     if ru_one_line:
         lines.append(f"🧠 {esc(clamp(ru_one_line, 220))}")
 
-    if inv_str:
-        lines.append(f"💼 Инвесторы: {esc(inv_str)}")
-    if sig_str:
-        lines.append(f"🏷 Сигналы: {esc(sig_str)}")
-
-    lines.append(f"🔗 {esc(url)}")
-    lines.append(f"🗞 Источник: {esc(source)}")
+    # link icon only
+    safe_url = esc(normalize_url(url))
+    lines.append(f'🔗 <a href="{safe_url}">{link_icon}</a>')
 
     return "\n".join(lines)
 
-def format_note_ru(deal: dict, score: int, reasons: list[str]) -> str:
+
+def format_note_ru(deal: dict, score: int, reasons: List[str]) -> str:
     why = join_bullets(deal.get("ru_why_important"), 4)
-    angles = join_bullets(deal.get("ru_deal_angles"), 4)
+    плюсы = join_bullets(deal.get("ru_deal_angles"), 4)  # теперь это "плюсы проекта"
     watch = join_bullets(deal.get("ru_watchouts"), 3)
 
     lines = []
-    lines.append(f"📝 <b>Короткая аналитика</b> (Score {score}/100)")
+    lines.append(f"📝 <b>Короткая аналитика</b> (Оценка потенциала {score}/100)")
     if reasons:
         lines.append(f"⚙️ Скоринг: {esc(', '.join(reasons[:8]))}")
 
@@ -82,9 +119,9 @@ def format_note_ru(deal: dict, score: int, reasons: list[str]) -> str:
         for b in why:
             lines.append(f"• {esc(clamp(b, 160))}")
 
-    if angles:
-        lines.append("\n<b>Как зайти в сделку</b>")
-        for b in angles:
+    if плюсы:
+        lines.append("\n<b>Плюсы проекта</b>")
+        for b in плюсы:
             lines.append(f"• {esc(clamp(b, 160))}")
 
     if watch:
@@ -94,13 +131,19 @@ def format_note_ru(deal: dict, score: int, reasons: list[str]) -> str:
 
     return "\n".join(lines)
 
+
 def main():
     cfg = load_config()
     init_db(cfg.db_path)
     state = load_state(cfg.state_path)
+
     sources = load_sources(cfg.sources_path)
     if not sources:
         raise RuntimeError("No sources found in sources.yaml")
+
+    max_posts = int(os.getenv("MAX_POSTS_PER_RUN", "2"))
+    min_year = int(os.getenv("MIN_PUBLISHED_YEAR", "2026"))
+    strict = os.getenv("YEAR_FILTER_STRICT", "1") == "1"
 
     posted = 0
     processed = 0
@@ -108,9 +151,16 @@ def main():
     for s in sources:
         name = s["name"]
         feed_url = s["url"]
+
         items = parse_feed(name, feed_url)
 
         for it in items:
+            if posted >= max_posts:
+                break
+
+            if not pass_year_filter(it, min_year=min_year, strict=strict):
+                continue
+
             if is_seen(state, it.url, it.guid):
                 continue
 
@@ -135,12 +185,12 @@ def main():
                 )
             except Exception as e:
                 print(f"[GROQ ERROR] {it.url} | {e}")
-                # НЕ mark_seen — пусть попробует снова на следующем запуске
+                # НЕ mark_seen — пусть попробует снова
                 continue
 
             deal = deal_obj.model_dump()
 
-            # 3) scoring (rules)
+            # 3) scoring
             sr = compute_score(
                 country=deal.get("country"),
                 stage=deal.get("stage"),
@@ -151,7 +201,7 @@ def main():
             )
 
             # 4) Post #1 (signal)
-            signal_text = format_signal_ru(it.source, it.title, it.url, deal, sr.score)
+            signal_text = format_signal_ru(it.title, it.url, deal, sr.score)
             try:
                 msg_id = send_message(cfg.telegram_bot_token, cfg.telegram_channel_id, signal_text)
             except Exception as e:
@@ -168,7 +218,6 @@ def main():
                     reply_to_message_id=msg_id,
                 )
             except Exception:
-                # если нота не ушла — это не критично, продолжаем
                 pass
 
             # 6) store
@@ -176,7 +225,7 @@ def main():
                 "created_at_utc": utc_now_iso(),
                 "source": it.source,
                 "title": it.title,
-                "url": it.url,
+                "url": normalize_url(it.url),
                 "guid": it.guid,
                 "published_at": it.published_at,
                 "company": deal.get("company"),
@@ -187,7 +236,7 @@ def main():
                 "sector": deal.get("sector"),
                 "business_model": deal.get("business_model"),
                 "signals": ",".join(deal.get("signals") or []),
-                "one_line": deal.get("ru_one_line") or deal.get("ru_one_line"),  # храним RU
+                "one_line": deal.get("ru_one_line") or "",
                 "confidence": deal.get("confidence"),
                 "deal_score": sr.score,
                 "score_reasons": ",".join(sr.reasons),
@@ -196,17 +245,14 @@ def main():
 
             # 7) mark seen
             mark_seen(state, it.url, it.guid)
-
             posted += 1
-            # лимит, чтобы не заспамить канал на первом запуске
-            if posted >= 3:
-                break
 
-        if posted >= 3:
+        if posted >= max_posts:
             break
 
     save_state(cfg.state_path, state)
     print(f"Processed new items: {processed}, Posted deals: {posted}")
+
 
 if __name__ == "__main__":
     main()
