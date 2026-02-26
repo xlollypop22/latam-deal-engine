@@ -1,9 +1,27 @@
 sources:
-  - name: TechCrunch LATAM
-    url: https://techcrunch.com/tag/latin-america/feed/
-  - name: LatAmList
-    url: https://latamlist.com/feed/
-  - name: Rest of World
-    url: https://restofworld.org/feed/
+  # LATAM: раунды и инвестиции
+  - name: "LatamList — Funding"
+    url: "https://latamlist.com/category/startup-news/funding/feed/"
+    tags: ["latam", "funding", "rounds"]
 
-# Crunchbase: обычно нужен API/платный доступ. Добавишь отдельным адаптером позже.
+  - name: "LatamList — Venture Capital"
+    url: "https://latamlist.com/category/venture-capital/feed/"
+    tags: ["latam", "vc", "funding"]
+
+  # LATAM: контент про VC/стартапы, часто с суммами (как минимум в обзорах)
+  - name: "Contxto — Weekly (Substack)"
+    url: "https://contxto.substack.com/feed"
+    tags: ["latam", "vc", "funding", "digest"]
+
+  - name: "Startupeable — (Substack)"
+    url: "https://startupeable.substack.com/feed"
+    tags: ["latam", "vc", "funding", "education"]
+
+  # Global funding (много раундов, сумм и инвесторов)
+  - name: "TechCrunch — Funding"
+    url: "https://techcrunch.com/tag/funding/feed/"
+    tags: ["global", "funding", "rounds"]
+
+  - name: "TechCrunch — Funding Round"
+    url: "https://techcrunch.com/tag/funding-round/feed/"
+    tags: ["global", "funding", "rounds"]
