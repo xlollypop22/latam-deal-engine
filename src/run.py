@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime, timezone
 import yaml
-from datetime import datetime
-from typing import List, Tuple, Optional
 
 from .config import load_config
-from .ingest import parse_feed, FeedItem
+from .ingest import parse_feed
 from .extract import fetch_article_text
 from .groq_ai import groq_extract
 from .score import compute_score
-from .storage import init_db, load_state, save_state, is_seen, mark_seen, insert_deal
+from .storage import (
+    init_db,
+    load_state,
+    save_state,
+    is_seen,
+    mark_seen,
+    insert_deal,
+)
 from .telegram import send_message, esc
 from .utils import utc_now_iso, clamp, normalize_url
 
@@ -22,11 +28,43 @@ def load_sources(path: str):
     return data.get("sources", [])
 
 
-def fmt_amount(amount) -> Optional[str]:
+# ----------------- Filters -----------------
+
+def parse_iso_dt(s: str | None) -> datetime | None:
+    if not s:
+        return None
+    try:
+        # Python 3.11: fromisoformat понимает "+00:00"
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def extract_year_from_url(url: str) -> int | None:
+    # TechCrunch: /2025/03/27/...
+    m = re.search(r"/(20\d{2})/", url or "")
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+def is_allowed_year(published_at_iso: str | None, url: str, min_year: int) -> bool:
+    dt = parse_iso_dt(published_at_iso)
+    if dt:
+        return dt.year >= min_year
+    y = extract_year_from_url(url)
+    if y is not None:
+        return y >= min_year
+    # если год определить нельзя — считаем НЕ ок, когда strict
+    return False
+
+
+def fmt_amount(amount):
     if not isinstance(amount, (int, float)) or amount <= 0:
         return None
-    if amount >= 1_000_000_000:
-        return f"${amount/1_000_000_000:.1f}B"
     if amount >= 1_000_000:
         return f"${amount/1_000_000:.1f}M"
     if amount >= 1_000:
@@ -39,114 +77,108 @@ def join_bullets(items, max_n=4):
     return items[:max_n]
 
 
-def infer_year_from_url(url: str) -> Optional[int]:
-    u = (url or "").strip()
-    m = re.search(r"/(20\d{2})/", u)
-    if m:
-        try:
-            return int(m.group(1))
-        except Exception:
-            return None
-    m = re.search(r"(20\d{2})", u)
-    if m:
-        try:
-            return int(m.group(1))
-        except Exception:
-            return None
-    return None
+# ----------------- Formatting (your desired style) -----------------
+
+LINK_ICON = os.getenv("LINK_ICON", "↗").strip() or "↗"
 
 
-def item_year(it: FeedItem) -> Optional[int]:
-    # 1) published_at ISO
-    if it.published_at:
-        try:
-            return datetime.fromisoformat(it.published_at.replace("Z", "+00:00")).year
-        except Exception:
-            pass
-    # 2) url hint
-    return infer_year_from_url(it.url)
-
-
-def pass_year_filter(it: FeedItem, min_year: int, strict: bool) -> bool:
-    y = item_year(it)
-    if y is None:
-        return not strict
-    return y >= min_year
-
-
-def format_signal_ru(title: str, url: str, deal: dict, score: int) -> str:
-    # desired: no "Источник", no "Сигналы", link as icon
-    link_icon = "↗"
+def format_signal_ru(source: str, title: str, url: str, deal: dict, score: int) -> str:
     country = deal.get("country") or "LATAM"
-    company = (deal.get("company") or "").strip() or "—"
+    company = deal.get("company") or "Компания"
     stage = deal.get("stage") or "Unknown"
     bm = deal.get("business_model") or "Unknown"
-    sector = (deal.get("sector") or "unknown").strip().lower()
-    amount_str = fmt_amount(deal.get("amount_usd")) or "—"
+    sector = deal.get("sector") or "unknown"
 
-    ru_one_line = (deal.get("ru_one_line") or "").strip()
+    amount_str = fmt_amount(deal.get("amount_usd")) or "—"
+    investors = deal.get("investors") or []
+    ru_one_line = deal.get("ru_one_line") or ""
+
+    inv_str = ", ".join(investors[:4])
+
+    # ссылка в иконку (экономия места)
+    link = f"{LINK_ICON} {esc(url)}"
 
     lines = []
-    lines.append(f"📡 <b>Сделка / сигнал</b> | {esc(country)}")
-    lines.append(f"<b>{esc(company)}</b>")
+    lines.append(f"📡 Сделка / сигнал | {esc(country)}")
+    lines.append(f"Компания: {esc(company)}")
     lines.append(f"{esc(clamp(title, 220))}")
 
-    lines.append(f"Раунд: {esc(stage)} | Модель: {esc(bm)} | Инвестиции: {esc(amount_str)}")
-    lines.append(f"Отрасль: {esc(sector)} | Оценка потенциала: {score}/100")
+    lines.append(f"Раунд: {esc(stage)} | Инвестиции: {esc(amount_str)} | Модель: {esc(bm)}")
+    lines.append(f"Сектор: {esc(sector)} | Оценка потенциала: {score}/100")
 
     if ru_one_line:
         lines.append(f"🧠 {esc(clamp(ru_one_line, 220))}")
 
-    # link icon only
-    safe_url = esc(normalize_url(url))
-    lines.append(f'🔗 <a href="{safe_url}">{link_icon}</a>')
+    if inv_str:
+        lines.append(f"💼 Инвесторы: {esc(inv_str)}")
 
+    lines.append(link)
+
+    # убрали "Источник" и "Сигналы" — как ты хотел
     return "\n".join(lines)
 
 
-def format_note_ru(deal: dict, score: int, reasons: List[str]) -> str:
+def format_note_ru(deal: dict, score: int, reasons: list[str]) -> str:
     why = join_bullets(deal.get("ru_why_important"), 4)
-    плюсы = join_bullets(deal.get("ru_deal_angles"), 4)  # теперь это "плюсы проекта"
+
+    # "Как зайти в сделку" → "Плюсы проекта"
+    pros = join_bullets(deal.get("ru_deal_angles"), 4)
+
     watch = join_bullets(deal.get("ru_watchouts"), 3)
 
     lines = []
-    lines.append(f"📝 <b>Короткая аналитика</b> (Оценка потенциала {score}/100)")
+    lines.append(f"📝 Короткая аналитика (оценка {score}/100)")
+
     if reasons:
         lines.append(f"⚙️ Скоринг: {esc(', '.join(reasons[:8]))}")
 
     if why:
-        lines.append("\n<b>Почему важно</b>")
+        lines.append("\nПочему проект важен")
         for b in why:
             lines.append(f"• {esc(clamp(b, 160))}")
 
-    if плюсы:
-        lines.append("\n<b>Плюсы проекта</b>")
-        for b in плюсы:
+    if pros:
+        lines.append("\nПлюсы проекта")
+        for b in pros:
             lines.append(f"• {esc(clamp(b, 160))}")
 
     if watch:
-        lines.append("\n<b>Риски / оговорки</b>")
+        lines.append("\nРиски / оговорки")
         for b in watch:
             lines.append(f"• {esc(clamp(b, 160))}")
 
     return "\n".join(lines)
 
 
+# ----------------- MAIN -----------------
+
 def main():
     cfg = load_config()
     init_db(cfg.db_path)
-    state = load_state(cfg.state_path)
 
+    state = load_state(cfg.state_path)
     sources = load_sources(cfg.sources_path)
     if not sources:
         raise RuntimeError("No sources found in sources.yaml")
 
+    # env controls
     max_posts = int(os.getenv("MAX_POSTS_PER_RUN", "2"))
     min_year = int(os.getenv("MIN_PUBLISHED_YEAR", "2026"))
-    strict = os.getenv("YEAR_FILTER_STRICT", "1") == "1"
+    strict_year = os.getenv("YEAR_FILTER_STRICT", "1") == "1"
+
+    # “новое” считаем от last_run_utc
+    last_run_dt = parse_iso_dt(state.get("last_run_utc"))
+    if last_run_dt is None:
+        # если первый запуск/нет даты — берём очень старую точку
+        last_run_dt = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
     posted = 0
-    processed = 0
+    processed_new = 0
+
+    # debug counters
+    skipped_seen = 0
+    skipped_not_newer_than_last_run = 0
+    skipped_year = 0
 
     for s in sources:
         name = s["name"]
@@ -155,20 +187,28 @@ def main():
         items = parse_feed(name, feed_url)
 
         for it in items:
-            if posted >= max_posts:
-                break
+            u = normalize_url(it.url)
 
-            if not pass_year_filter(it, min_year=min_year, strict=strict):
+            if is_seen(state, u, it.guid):
+                skipped_seen += 1
                 continue
 
-            if is_seen(state, it.url, it.guid):
+            # фильтр “новее прошлого запуска”
+            it_dt = parse_iso_dt(it.published_at)
+            if it_dt and it_dt <= last_run_dt:
+                skipped_not_newer_than_last_run += 1
                 continue
 
-            processed += 1
+            # фильтр по году (2026+)
+            if strict_year and not is_allowed_year(it.published_at, u, min_year):
+                skipped_year += 1
+                continue
+
+            processed_new += 1
 
             # 1) extract text
             try:
-                text = fetch_article_text(it.url)
+                text = fetch_article_text(u)
             except Exception:
                 text = ""
 
@@ -178,13 +218,13 @@ def main():
                     api_key=cfg.groq_api_key,
                     model=cfg.groq_model,
                     title=it.title,
-                    url=it.url,
+                    url=u,
                     source=it.source,
                     text=text,
                     fallback_summary=it.summary,
                 )
             except Exception as e:
-                print(f"[GROQ ERROR] {it.url} | {e}")
+                print(f"[GROQ ERROR] {u} | {e}")
                 # НЕ mark_seen — пусть попробует снова
                 continue
 
@@ -201,11 +241,11 @@ def main():
             )
 
             # 4) Post #1 (signal)
-            signal_text = format_signal_ru(it.title, it.url, deal, sr.score)
+            signal_text = format_signal_ru(it.source, it.title, u, deal, sr.score)
             try:
                 msg_id = send_message(cfg.telegram_bot_token, cfg.telegram_channel_id, signal_text)
             except Exception as e:
-                print(f"[TG ERROR] {it.url} | {e}")
+                print(f"[TG ERROR] {u} | {e}")
                 continue
 
             # 5) Post #2 (note) as reply
@@ -225,7 +265,7 @@ def main():
                 "created_at_utc": utc_now_iso(),
                 "source": it.source,
                 "title": it.title,
-                "url": normalize_url(it.url),
+                "url": u,
                 "guid": it.guid,
                 "published_at": it.published_at,
                 "company": deal.get("company"),
@@ -236,7 +276,7 @@ def main():
                 "sector": deal.get("sector"),
                 "business_model": deal.get("business_model"),
                 "signals": ",".join(deal.get("signals") or []),
-                "one_line": deal.get("ru_one_line") or "",
+                "one_line": deal.get("ru_one_line"),
                 "confidence": deal.get("confidence"),
                 "deal_score": sr.score,
                 "score_reasons": ",".join(sr.reasons),
@@ -244,14 +284,24 @@ def main():
             insert_deal(cfg.db_path, record)
 
             # 7) mark seen
-            mark_seen(state, it.url, it.guid)
+            mark_seen(state, u, it.guid)
             posted += 1
+
+            if posted >= max_posts:
+                break
 
         if posted >= max_posts:
             break
 
     save_state(cfg.state_path, state)
-    print(f"Processed new items: {processed}, Posted deals: {posted}")
+
+    print(
+        "Processed new items: "
+        f"{processed_new}, Posted deals: {posted} | "
+        f"skipped_seen={skipped_seen}, "
+        f"skipped_old={skipped_not_newer_than_last_run}, "
+        f"skipped_year={skipped_year}"
+    )
 
 
 if __name__ == "__main__":
